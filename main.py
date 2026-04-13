@@ -1,19 +1,21 @@
 """
 POSTUREGHOST - Coach posture IA avec fantôme + Voice Coach + Gamification
-Version 2.0 - Améliorations visuelles et fonctionnelles
+Version 3.0 - Nouvelles fonctionnalités majeures
 Challenge: Wellness & Agent Challenge GIEW 2026
 
-Nouveautés v2.0:
-  - Panneau gauche redesigné avec anneau de score animé
-  - Mode calibration : capture ta propre posture idéale comme fantôme
-  - Mini-graphe historique du score en temps réel
-  - Rappels de pause configurable (minuterie Pomodoro)
-  - Heatmap des articulations sous tension
-  - Export CSV automatique de la session
-  - Overlay de respiration guidée (inspire / expire)
-  - Détection de position assise vs debout
-  - Indicateur de tendance (amélioration / dégradation)
-  - Affichage HUD plus propre avec transitions de couleur fluides
+Nouveautés v3.0:
+  - Rapport de session HTML généré automatiquement à la fin
+  - Mode focus / distraction : détecte les regards hors caméra
+  - Compteur de micro-pauses intelligentes (stretch reminders)
+  - Panneau droit : conseils posturaux en rotation automatique
+  - Détection de fatigue : score qui chute progressivement = alerte
+  - Historique inter-sessions (fichier JSON persistant)
+  - Affichage du temps total en bonne / mauvaise posture dans le HUD
+  - Mode nuit : palette sombre réduite à partir de 20h
+  - Overlay angle de cou (neck angle) en degrés sur le squelette
+  - Touche H : affiche un panneau d'aide complet en overlay
+  - Score moyen de session affiché en temps réel
+  - Détection de haussement d'épaules (stress indicator)
 """
 
 import cv2
@@ -22,22 +24,23 @@ import numpy as np
 import time
 import os
 import csv
+import json
 import threading
 import pyttsx3
 from datetime import datetime
 from collections import deque
+from pathlib import Path
 
-# Gamification module (inchangé)
 try:
     from gamification import GamificationManager
     GAMIFICATION_AVAILABLE = True
 except ImportError:
     GAMIFICATION_AVAILABLE = False
-    print("  [AVERT] Module gamification introuvable - désactivé.")
+    print("  [AVERT] Module gamification introuvable - desactive.")
 
-# ============================================
+# ============================================================
 # CONFIGURATION
-# ============================================
+# ============================================================
 
 FRAME_SKIP          = 1
 RESOLUTION_WIDTH    = 1280
@@ -47,13 +50,13 @@ GOOD_POSTURE_THRESHOLD = 75
 WARNING_THRESHOLD      = 55
 CRITICAL_THRESHOLD     = 35
 
-# Minuterie de pause (secondes). 0 = désactivé.
-BREAK_REMINDER_SEC = 25 * 60   # 25 min par défaut (Pomodoro)
+BREAK_REMINDER_SEC  = 25 * 60      # Pomodoro 25 min
+STRETCH_INTERVAL    = 5 * 60       # Rappel stretch toutes les 5 min
+EXPORT_CSV          = True
+EXPORT_HTML_REPORT  = True
+HISTORY_FILE        = "sessions/history.json"
 
-# Export CSV automatique
-EXPORT_CSV = True
-
-# Couleurs (BGR)
+# Couleurs BGR
 COLOR_GREEN      = (0, 220, 100)
 COLOR_RED        = (50, 50, 230)
 COLOR_ORANGE     = (0, 140, 255)
@@ -62,32 +65,36 @@ COLOR_CYAN       = (220, 220, 0)
 COLOR_GHOST      = (255, 200, 180)
 COLOR_GHOST_BONE = (200, 170, 255)
 COLOR_PANEL_BG   = (28, 24, 42)
-COLOR_ACCENT     = (180, 100, 255)   # violet accent
-COLOR_GOLD       = (0, 200, 255)     # badge gold
+COLOR_ACCENT     = (180, 100, 255)
+COLOR_GOLD       = (0, 200, 255)
+COLOR_DARK_BG    = (18, 14, 28)    # mode nuit
 
-# Palette score (interpolée selon score 0-100)
-def score_color(score):
-    """Renvoie une couleur BGR interpolée entre rouge, orange et vert."""
-    if score >= GOOD_POSTURE_THRESHOLD:
-        return COLOR_GREEN
-    elif score >= WARNING_THRESHOLD:
-        t = (score - WARNING_THRESHOLD) / (GOOD_POSTURE_THRESHOLD - WARNING_THRESHOLD)
-        r = int(COLOR_ORANGE[0] + t * (COLOR_GREEN[0] - COLOR_ORANGE[0]))
-        g = int(COLOR_ORANGE[1] + t * (COLOR_GREEN[1] - COLOR_ORANGE[1]))
-        b = int(COLOR_ORANGE[2] + t * (COLOR_GREEN[2] - COLOR_ORANGE[2]))
-        return (r, g, b)
-    elif score >= CRITICAL_THRESHOLD:
-        t = (score - CRITICAL_THRESHOLD) / (WARNING_THRESHOLD - CRITICAL_THRESHOLD)
-        r = int(COLOR_RED[0] + t * (COLOR_ORANGE[0] - COLOR_RED[0]))
-        g = int(COLOR_RED[1] + t * (COLOR_ORANGE[1] - COLOR_RED[1]))
-        b = int(COLOR_RED[2] + t * (COLOR_ORANGE[2] - COLOR_RED[2]))
-        return (r, g, b)
-    else:
-        return COLOR_RED
+# Conseils posturaux rotatifs
+POSTURE_TIPS = [
+    "Ecrans a hauteur des yeux",
+    "Pieds a plat sur le sol",
+    "Dos droit, epaules detendues",
+    "Coudes a 90 degres",
+    "Clavier proche du corps",
+    "Regle le siege : hanches > genoux",
+    "20-20-20 : pause visuelle toutes 20 min",
+    "Boire de l eau regulierement",
+    "Epaules en arriere, pas en avant",
+    "Menton legerement rentre",
+]
 
-# ============================================
+STRETCH_EXERCISES = [
+    "Roulez les epaules 5 fois",
+    "Inclinez la tete gauche/droite 10s",
+    "Etirement du cou : menton vers poitrine",
+    "Levez les bras au-dessus 20s",
+    "Rotation du buste assis x5",
+    "Pressez les omoplates 10s",
+]
+
+# ============================================================
 # MEDIAPIPE
-# ============================================
+# ============================================================
 
 mp_pose    = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
@@ -101,9 +108,33 @@ pose = mp_pose.Pose(
     min_tracking_confidence=0.6
 )
 
-# ============================================
+# ============================================================
+# HELPERS COULEUR
+# ============================================================
+
+def score_color(score):
+    """BGR interpolee rouge -> orange -> vert."""
+    if score >= GOOD_POSTURE_THRESHOLD:
+        return COLOR_GREEN
+    elif score >= WARNING_THRESHOLD:
+        t = (score - WARNING_THRESHOLD) / (GOOD_POSTURE_THRESHOLD - WARNING_THRESHOLD)
+        return tuple(int(COLOR_ORANGE[i] + t * (COLOR_GREEN[i] - COLOR_ORANGE[i])) for i in range(3))
+    elif score >= CRITICAL_THRESHOLD:
+        t = (score - CRITICAL_THRESHOLD) / (WARNING_THRESHOLD - CRITICAL_THRESHOLD)
+        return tuple(int(COLOR_RED[i] + t * (COLOR_ORANGE[i] - COLOR_RED[i])) for i in range(3))
+    return COLOR_RED
+
+
+def night_mode_active():
+    return datetime.now().hour >= 20 or datetime.now().hour < 6
+
+
+def panel_bg():
+    return COLOR_DARK_BG if night_mode_active() else COLOR_PANEL_BG
+
+# ============================================================
 # VOICE COACH
-# ============================================
+# ============================================================
 
 class VoiceCoach:
     def __init__(self, lang='fr'):
@@ -111,10 +142,10 @@ class VoiceCoach:
         self.engine.setProperty('rate', 155)
         self.engine.setProperty('volume', 0.9)
         self._set_language(lang)
-        self._speaking  = False
+        self._speaking    = False
         self._last_spoken = 0
-        self._cooldown  = 8.0
-        self.muted      = False
+        self._cooldown    = 8.0
+        self.muted        = False
 
     def _set_language(self, lang):
         try:
@@ -144,8 +175,7 @@ class VoiceCoach:
         if not force and (now - self._last_spoken) < self._cooldown:
             return
         self._last_spoken = now
-        t = threading.Thread(target=self._speak_blocking, args=(text,), daemon=True)
-        t.start()
+        threading.Thread(target=self._speak_blocking, args=(text,), daemon=True).start()
 
     def stop(self):
         try:
@@ -157,27 +187,27 @@ class VoiceCoach:
 def get_voice_alert(score, back_angle, head_fwd, shoulder_tilt):
     if score >= GOOD_POSTURE_THRESHOLD:
         return None, False
-    back_badness     = min(100, back_angle * 1.8)
-    head_badness     = min(100, abs(head_fwd) * 0.9)
-    shoulder_badness = min(100, shoulder_tilt * 2.0)
-    worst = max(back_badness, head_badness, shoulder_badness)
+    back_bad = min(100, back_angle * 1.8)
+    head_bad = min(100, abs(head_fwd) * 0.9)
+    sh_bad   = min(100, shoulder_tilt * 2.0)
+    worst    = max(back_bad, head_bad, sh_bad)
     if score < CRITICAL_THRESHOLD:
-        return "Danger ! Redressez-vous immédiatement.", True
-    if worst == back_badness:
-        return "Attention, votre dos est penché. Redressez-vous.", False
-    elif worst == head_badness:
-        return "Votre tête est trop en avant. Rentrez le menton.", False
+        return "Danger ! Redressez-vous immediatement.", True
+    if worst == back_bad:
+        return "Votre dos est penche. Redressez-vous.", False
+    elif worst == head_bad:
+        return "Tete trop en avant. Rentrez le menton.", False
     else:
-        return "Vos épaules sont déséquilibrées. Alignez-les.", False
+        return "Epaules desequilibrees. Alignez-les.", False
 
-# ============================================
-# CALCUL ANGLES & SCORE
-# ============================================
+# ============================================================
+# CALCULS
+# ============================================================
 
 def calculate_angle(a, b, c):
     a, b, c = np.array(a), np.array(b), np.array(c)
-    radians = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
-    angle = np.abs(radians * 180.0 / np.pi)
+    rad = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
+    angle = np.abs(rad * 180.0 / np.pi)
     return 360 - angle if angle > 180.0 else angle
 
 
@@ -196,8 +226,8 @@ def calculate_posture_score(landmarks, frame_shape):
     re = pt(mp_pose.PoseLandmark.RIGHT_EAR.value)
 
     back_angle = (
-        calculate_angle(ls, lh, [lh[0], lh[1] - 100]) +
-        calculate_angle(rs, rh, [rh[0], rh[1] - 100])
+        calculate_angle(ls, lh, [lh[0], lh[1]-100]) +
+        calculate_angle(rs, rh, [rh[0], rh[1]-100])
     ) / 2
 
     ear_mid  = [(le[0]+re[0])/2, (le[1]+re[1])/2]
@@ -206,12 +236,14 @@ def calculate_posture_score(landmarks, frame_shape):
 
     shoulder_tilt = abs(ls[1] - rs[1])
 
+    neck_angle = calculate_angle(le, ls, [ls[0], ls[1]-100])
+
     back_score     = max(0, 100 - back_angle * 1.8)
     head_score     = max(0, 100 - abs(head_fwd) * 0.9)
     shoulder_score = max(0, 100 - shoulder_tilt * 2.0)
 
     score = int(back_score * 0.50 + head_score * 0.30 + shoulder_score * 0.20)
-    return max(0, min(100, score)), back_angle, head_fwd, shoulder_tilt
+    return max(0, min(100, score)), back_angle, head_fwd, shoulder_tilt, neck_angle
 
 
 def get_status(score):
@@ -224,21 +256,178 @@ def get_status(score):
 
 
 def detect_sitting(landmarks, frame_shape):
-    """Heuristique simple : si la hanche est proche du bas du cadre."""
-    h, _ = frame_shape[:2]
+    h = frame_shape[0]
     lh_y = landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].y
     rh_y = landmarks[mp_pose.PoseLandmark.RIGHT_HIP.value].y
-    hip_y = ((lh_y + rh_y) / 2) * h
-    return hip_y > h * 0.60
+    return ((lh_y + rh_y) / 2) * h > h * 0.60
 
-# ============================================
+
+def detect_shrug(landmarks, frame_shape):
+    """Epaules trop hautes = haussement de stress."""
+    h = frame_shape[0]
+    ls_y  = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value].y * h
+    rs_y  = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].y * h
+    lh_y  = landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].y * h
+    rh_y  = landmarks[mp_pose.PoseLandmark.RIGHT_HIP.value].y * h
+    sh_y  = (ls_y + rs_y) / 2
+    hip_y = (lh_y + rh_y) / 2
+    ratio = (hip_y - sh_y) / max(1, hip_y)
+    return ratio < 0.28
+
+
+def detect_distraction(landmarks, frame_shape):
+    """Nez trop decale = regard tourne."""
+    w = frame_shape[1]
+    nose_x      = landmarks[mp_pose.PoseLandmark.NOSE.value].x * w
+    le_x        = landmarks[mp_pose.PoseLandmark.LEFT_EAR.value].x * w
+    re_x        = landmarks[mp_pose.PoseLandmark.RIGHT_EAR.value].x * w
+    face_center = (le_x + re_x) / 2
+    return abs(nose_x - face_center) > w * 0.06
+
+
+def detect_fatigue(scores_history):
+    """Chute continue sur 60 frames = fatigue."""
+    if len(scores_history) < 60:
+        return False
+    recent = list(scores_history)[-60:]
+    return (np.mean(recent[:30]) - np.mean(recent[30:])) > 12
+
+# ============================================================
+# HISTORIQUE INTER-SESSIONS
+# ============================================================
+
+class SessionHistory:
+    def __init__(self, path=HISTORY_FILE):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.data = self._load()
+
+    def _load(self):
+        if self.path.exists():
+            try:
+                with open(self.path) as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {"sessions": []}
+
+    def save_session(self, duration_sec, good_pct, avg_score, best_score):
+        entry = {
+            "date":         datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "duration_sec": round(duration_sec),
+            "good_pct":     round(good_pct, 1),
+            "avg_score":    round(avg_score, 1),
+            "best_score":   best_score,
+        }
+        self.data["sessions"].append(entry)
+        self.data["sessions"] = self.data["sessions"][-30:]
+        with open(self.path, "w") as f:
+            json.dump(self.data, f, indent=2)
+        return entry
+
+    def best_streak(self):
+        streak = 0
+        for s in reversed(self.data["sessions"]):
+            if s.get("good_pct", 0) > 60:
+                streak += 1
+            else:
+                break
+        return streak
+
+    def all_time_avg(self):
+        if not self.data["sessions"]:
+            return 0
+        return round(np.mean([s["avg_score"] for s in self.data["sessions"]]), 1)
+
+# ============================================================
+# RAPPORT HTML
+# ============================================================
+
+def generate_html_report(duration_sec, good_pct, avg_score, best_score,
+                         scores_list, history):
+    os.makedirs("sessions", exist_ok=True)
+    fn = f"sessions/report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+
+    if len(scores_list) > 1:
+        n      = len(scores_list)
+        step   = max(1, n // 200)
+        sampled = scores_list[::step]
+        pts = []
+        for i, s in enumerate(sampled):
+            x = 10 + int(i / max(len(sampled)-1, 1) * 580)
+            y = 90 - int(s / 100 * 80)
+            pts.append(f"{x},{y}")
+        svg_graph = (
+            '<svg width="600" height="100" style="background:#1a1628;border-radius:8px">'
+            f'<polyline points="{" ".join(pts)}" fill="none" stroke="#a06cff" stroke-width="2"/>'
+            '</svg>'
+        )
+    else:
+        svg_graph = ""
+
+    past_rows = ""
+    for s in reversed(history.data["sessions"][-10:]):
+        color = "#4ede7b" if s["good_pct"] > 60 else "#ff8c32"
+        past_rows += (
+            f"<tr><td>{s['date']}</td>"
+            f"<td>{s['duration_sec']//60} min</td>"
+            f"<td style='color:{color}'>{s['good_pct']}%</td>"
+            f"<td>{s['avg_score']}</td>"
+            f"<td>{s['best_score']}</td></tr>\n"
+        )
+
+    html = f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>PostureGhost - Rapport de session</title>
+<style>
+  body {{ font-family: sans-serif; background: #0f0c1a; color: #e0daf5; margin: 0; padding: 2rem; }}
+  h1 {{ color: #a06cff; }} h2 {{ color: #7dd6f0; margin-top: 2rem; }}
+  .cards {{ display: flex; gap: 1.5rem; flex-wrap: wrap; margin: 1.5rem 0; }}
+  .card {{ background: #1c1630; border-radius: 12px; padding: 1.2rem 1.8rem; min-width: 160px; }}
+  .card .val {{ font-size: 2rem; font-weight: bold; }}
+  .card .lbl {{ font-size: 0.8rem; color: #9090b0; margin-top: 4px; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ padding: 0.5rem 1rem; text-align: left; border-bottom: 1px solid #2a2440; }}
+  th {{ color: #a06cff; }}
+</style>
+</head>
+<body>
+<h1>PostureGhost v3.0 - Rapport de session</h1>
+<p style="color:#7090a0">{datetime.now().strftime('%A %d %B %Y, %H:%M')}</p>
+<div class="cards">
+  <div class="card"><div class="val" style="color:#4ede7b">{good_pct:.0f}%</div><div class="lbl">Bonne posture</div></div>
+  <div class="card"><div class="val" style="color:#a06cff">{avg_score:.0f}</div><div class="lbl">Score moyen</div></div>
+  <div class="card"><div class="val" style="color:#7dd6f0">{best_score}</div><div class="lbl">Meilleur score</div></div>
+  <div class="card"><div class="val" style="color:#ffcc55">{int(duration_sec)//60} min</div><div class="lbl">Duree</div></div>
+  <div class="card"><div class="val" style="color:#ff8c32">{history.best_streak()}</div><div class="lbl">Streak sessions</div></div>
+  <div class="card"><div class="val" style="color:#c0c0e0">{history.all_time_avg()}</div><div class="lbl">Moy. historique</div></div>
+</div>
+<h2>Courbe de score</h2>
+{svg_graph}
+<h2>10 dernieres sessions</h2>
+<table>
+  <tr><th>Date</th><th>Duree</th><th>Bonne posture</th><th>Score moy.</th><th>Meilleur</th></tr>
+  {past_rows}
+</table>
+<p style="color:#3a3460;margin-top:3rem">Genere par PostureGhost v3.0</p>
+</body>
+</html>"""
+
+    with open(fn, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"  Rapport HTML : {fn}")
+    return fn
+
+# ============================================================
 # HELPERS DESSIN
-# ============================================
+# ============================================================
 
 def rounded_rect(img, x1, y1, x2, y2, color, r=12, fill=True, alpha=1.0):
     if img is None:
         return
-    x1, y1, x2, y2, r = int(x1), int(y1), int(x2), int(y2), int(r)
+    x1, y1, x2, y2, r = int(x1), int(y1), int(x2), int(y2), max(1, int(r))
     if alpha < 1.0:
         ov = img.copy()
         rounded_rect(ov, x1, y1, x2, y2, color, r, fill, 1.0)
@@ -261,26 +450,23 @@ def rounded_rect(img, x1, y1, x2, y2, color, r=12, fill=True, alpha=1.0):
 
 
 def progress_bar(img, x, y, w, h, pct, color_fill, color_bg=(50, 45, 70)):
-    rounded_rect(img, x, y, x+w, y+h, color_bg, r=h//2)
-    fill = max(h, int(pct/100*w))
-    fill = min(fill, w)
-    rounded_rect(img, x, y, x+fill, y+h, color_fill, r=h//2)
+    r = max(1, h//2)
+    rounded_rect(img, x, y, x+w, y+h, color_bg, r=r)
+    fill = min(w, max(h, int(pct/100*w)))
+    rounded_rect(img, x, y, x+fill, y+h, color_fill, r=r)
 
 
 def draw_arc_ring(img, cx, cy, radius, thickness, pct, color, bg_color=(55, 50, 75)):
-    """Dessine un anneau de progression type donut."""
-    start_angle = -90
-    end_angle   = -90 + int(360 * pct / 100)
-    cv2.ellipse(img, (cx, cy), (radius, radius), 0, 0, 360, bg_color, thickness, cv2.LINE_AA)
+    cv2.ellipse(img, (int(cx), int(cy)), (int(radius), int(radius)),
+                0, 0, 360, bg_color, int(thickness), cv2.LINE_AA)
     if pct > 0:
-        cv2.ellipse(img, (cx, cy), (radius, radius), 0, start_angle, end_angle, color, thickness, cv2.LINE_AA)
+        cv2.ellipse(img, (int(cx), int(cy)), (int(radius), int(radius)),
+                    0, -90, -90 + int(360 * pct / 100), color, int(thickness), cv2.LINE_AA)
 
 
 def draw_score_ring(frame, cx, cy, score):
-    """Anneau animé centré sur (cx, cy) avec score + label."""
     col = score_color(score)
     draw_arc_ring(frame, cx, cy, 56, 10, score, col)
-    # Pulsation danger
     if score < CRITICAL_THRESHOLD and int(time.time() * 4) % 2:
         draw_arc_ring(frame, cx, cy, 64, 3, 100, COLOR_RED)
     s_str = str(score)
@@ -291,134 +477,150 @@ def draw_score_ring(frame, cx, cy, score):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1, cv2.LINE_AA)
 
 
-def draw_mini_graph(frame, scores, x, y, w, h, color=(130, 100, 220)):
-    """Mini-graphe du score sur les 90 dernières frames."""
+def draw_mini_graph(frame, scores, x, y, w, h):
     if len(scores) < 2:
         return
     rounded_rect(frame, x, y, x+w, y+h, (38, 33, 58), r=6, alpha=0.85)
-    # Lignes de grille subtiles
     for thresh, c in [(GOOD_POSTURE_THRESHOLD, COLOR_GREEN),
                       (WARNING_THRESHOLD, COLOR_ORANGE),
                       (CRITICAL_THRESHOLD, COLOR_RED)]:
         gy = y + h - int(thresh / 100 * h)
         cv2.line(frame, (x+2, gy), (x+w-2, gy), c, 1, cv2.LINE_AA)
-    # Courbe
+    n   = len(scores)
     pts = []
-    n = len(scores)
     for i, s in enumerate(scores):
         px = x + int(i / max(n-1, 1) * w)
-        py = y + h - int(s / 100 * h)
+        py = y + h - max(1, int(s / 100 * h))
         pts.append((px, py))
     for i in range(len(pts)-1):
-        col = score_color(scores[i])
-        cv2.line(frame, pts[i], pts[i+1], col, 2, cv2.LINE_AA)
+        cv2.line(frame, pts[i], pts[i+1], score_color(scores[i]), 2, cv2.LINE_AA)
 
 
 def draw_breathing_guide(frame, w, h, session_time):
-    """Indicateur de respiration guidée en bas à droite."""
-    cycle = 8.0  # 4s inspire + 4s expire
+    cycle = 8.0
     phase = session_time % cycle
     if phase < 4.0:
-        label = "INSPIREZ"
-        progress = phase / 4.0
-        col = (200, 240, 255)
+        label, progress, col = "INSPIREZ", phase/4.0, (200, 240, 255)
     else:
-        label = "EXPIREZ"
-        progress = (phase - 4.0) / 4.0
-        col = (150, 200, 170)
+        label, progress, col = "EXPIREZ",  (phase-4.0)/4.0, (150, 200, 170)
     bx, by = w - 135, h - 95
-    radius = 22
-    draw_arc_ring(frame, bx, by, radius, 5, int(progress * 100), col, (40, 40, 60))
-    cv2.putText(frame, label, (bx - 28, by + radius + 16),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.32, col, 1, cv2.LINE_AA)
-    cv2.putText(frame, "Respiration", (bx - 34, by - radius - 6),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.30, (110, 110, 140), 1, cv2.LINE_AA)
+    draw_arc_ring(frame, bx, by, 22, 5, int(progress*100), col, (40, 40, 60))
+    cv2.putText(frame, label,         (bx-28, by+38), cv2.FONT_HERSHEY_SIMPLEX, 0.32, col, 1, cv2.LINE_AA)
+    cv2.putText(frame, "Respiration", (bx-34, by-30), cv2.FONT_HERSHEY_SIMPLEX, 0.30, (110,110,140), 1, cv2.LINE_AA)
 
 
 def draw_break_reminder(frame, w, h, time_until_break, total_break_sec):
-    """Barre de progression de la pause."""
     if total_break_sec <= 0:
         return
-    elapsed = total_break_sec - time_until_break
-    pct = min(100, elapsed / total_break_sec * 100)
+    pct    = min(100, (total_break_sec - time_until_break) / total_break_sec * 100)
     bx, by = 340, h - 46
-    bar_w = 280
-    # Fond
-    rounded_rect(frame, bx, by, bx + bar_w, by + 13, (38, 33, 58), r=6, alpha=0.85)
-    # Remplissage (couleur vire vers orange en fin)
+    bar_w  = 280
+    rounded_rect(frame, bx, by, bx+bar_w, by+13, (38,33,58), r=6, alpha=0.85)
     col = COLOR_CYAN if pct < 70 else (COLOR_ORANGE if pct < 90 else COLOR_RED)
-    fill = max(6, int(pct / 100 * bar_w))
-    rounded_rect(frame, bx, by, bx + fill, by + 13, col, r=6)
-    mins = int(time_until_break // 60)
-    secs = int(time_until_break % 60)
+    rounded_rect(frame, bx, by, bx+max(6,int(pct/100*bar_w)), by+13, col, r=6)
+    mins, secs = int(time_until_break//60), int(time_until_break%60)
     cv2.putText(frame, f"Pause dans {mins:02d}:{secs:02d}",
-                (bx + 6, by + 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.36, COLOR_WHITE, 1, cv2.LINE_AA)
+                (bx+6, by+10), cv2.FONT_HERSHEY_SIMPLEX, 0.36, COLOR_WHITE, 1, cv2.LINE_AA)
     if time_until_break <= 0:
-        # Toast pause !
-        tw = 220
-        tx = w // 2 - tw // 2
-        rounded_rect(frame, tx, h//2 - 30, tx + tw, h//2 + 30, (50, 140, 80), r=12, alpha=0.92)
-        cv2.putText(frame, "Pause ! Levez-vous 5 min", (tx + 8, h//2 + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, COLOR_WHITE, 1, cv2.LINE_AA)
+        tx = w//2 - 110
+        rounded_rect(frame, tx, h//2-30, tx+220, h//2+30, (50,140,80), r=12, alpha=0.92)
+        cv2.putText(frame, "Pause ! Levez-vous 5 min",
+                    (tx+8, h//2+5), cv2.FONT_HERSHEY_SIMPLEX, 0.52, COLOR_WHITE, 1, cv2.LINE_AA)
+
+
+def draw_stretch_reminder(frame, w, h, exercise_text):
+    tw = len(exercise_text) * 9
+    tx = w//2 - tw//2
+    rounded_rect(frame, tx-14, h//2+50, tx+tw+14, h//2+86, (30,80,120), r=12, alpha=0.92)
+    cv2.putText(frame, f"Stretch : {exercise_text}",
+                (tx, h//2+74), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (180,230,255), 1, cv2.LINE_AA)
 
 
 def draw_trend_indicator(frame, scores, x, y):
-    """Flèche de tendance (+/-) selon les 20 dernières frames."""
     if len(scores) < 20:
         return
     delta = scores[-1] - scores[-20]
     if delta > 5:
-        symbol, col = chr(0x2191), COLOR_GREEN   # ↑
+        symbol, col = "^", COLOR_GREEN
     elif delta < -5:
-        symbol, col = chr(0x2193), COLOR_RED     # ↓
+        symbol, col = "v", COLOR_RED
     else:
-        symbol, col = chr(0x2192), (130, 130, 160)  # →
-    cv2.putText(frame, symbol, (x, y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 1, cv2.LINE_AA)
-    cv2.putText(frame, f"{delta:+.0f}", (x+18, y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.40, col, 1, cv2.LINE_AA)
+        symbol, col = "~", (130, 130, 160)
+    cv2.putText(frame, symbol,           (x,    y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 1, cv2.LINE_AA)
+    cv2.putText(frame, f"{delta:+.0f}", (x+18, y), cv2.FONT_HERSHEY_SIMPLEX, 0.40, col, 1, cv2.LINE_AA)
 
-# ============================================
-# DESSIN SQUELETTES
-# ============================================
+
+def draw_tip_panel(frame, w, h, tip_text):
+    bx, by = 16, h - 58
+    tw = len(tip_text) * 8 + 20
+    rounded_rect(frame, bx, by, bx+tw, by+26, (28,22,50), r=8, alpha=0.82)
+    cv2.putText(frame, f"Conseil : {tip_text}",
+                (bx+8, by+17), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (180,160,255), 1, cv2.LINE_AA)
+
+
+def draw_distraction_warning(frame, w, h):
+    rounded_rect(frame, w//2-160, h-100, w//2+160, h-68, (50,30,80), r=10, alpha=0.88)
+    cv2.putText(frame, "Regardez votre ecran !",
+                (w//2-130, h-78), cv2.FONT_HERSHEY_SIMPLEX, 0.52, COLOR_ACCENT, 1, cv2.LINE_AA)
+
+
+def draw_shrug_warning(frame, w):
+    rounded_rect(frame, w//2-180, 58, w//2+180, 92, (60,35,20), r=10, alpha=0.88)
+    cv2.putText(frame, "Detendez vos epaules !",
+                (w//2-148, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.52, COLOR_ORANGE, 1, cv2.LINE_AA)
+
+
+def draw_fatigue_warning(frame, w, h):
+    rounded_rect(frame, w-260, h-100, w-10, h-68, (40,20,60), r=10, alpha=0.88)
+    cv2.putText(frame, "Fatigue detectee !",
+                (w-248, h-78), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200,140,255), 1, cv2.LINE_AA)
+
+
+def draw_neck_angle(frame, landmarks, frame_shape, neck_angle):
+    h, w = frame_shape[:2]
+    ls   = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
+    sx   = int(ls.x * w) - 50
+    sy   = int(ls.y * h) - 15
+    col  = COLOR_GREEN if neck_angle < 20 else (COLOR_ORANGE if neck_angle < 40 else COLOR_RED)
+    cv2.putText(frame, f"Cou:{neck_angle:.0f}d",
+                (sx, sy), cv2.FONT_HERSHEY_SIMPLEX, 0.40, col, 1, cv2.LINE_AA)
+
+
+def draw_session_timer(frame, elapsed_sec, x, y):
+    m, s = int(elapsed_sec//60), int(elapsed_sec%60)
+    cv2.putText(frame, f"{m:02d}:{s:02d}",
+                (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (120,120,160), 1, cv2.LINE_AA)
+
+# ============================================================
+# SKELETONS
+# ============================================================
 
 def _joint_strain(lm_idx, back_angle, head_fwd, shoulder_tilt):
-    """Retourne une valeur 0-1 de 'tension' pour un landmark donné."""
-    back_bad  = min(1.0, back_angle / 55.0)
-    head_bad  = min(1.0, abs(head_fwd) / 110.0)
-    sh_bad    = min(1.0, shoulder_tilt / 50.0)
-    spine_joints = {
-        mp_pose.PoseLandmark.LEFT_SHOULDER.value,
-        mp_pose.PoseLandmark.RIGHT_SHOULDER.value,
-        mp_pose.PoseLandmark.LEFT_HIP.value,
-        mp_pose.PoseLandmark.RIGHT_HIP.value,
-    }
-    neck_joints = {
-        mp_pose.PoseLandmark.LEFT_EAR.value,
-        mp_pose.PoseLandmark.RIGHT_EAR.value,
-        mp_pose.PoseLandmark.NOSE.value,
-    }
-    if lm_idx in spine_joints:
+    back_bad = min(1.0, back_angle / 55.0)
+    head_bad = min(1.0, abs(head_fwd) / 110.0)
+    sh_bad   = min(1.0, shoulder_tilt / 50.0)
+    spine_j  = {mp_pose.PoseLandmark.LEFT_SHOULDER.value,
+                mp_pose.PoseLandmark.RIGHT_SHOULDER.value,
+                mp_pose.PoseLandmark.LEFT_HIP.value,
+                mp_pose.PoseLandmark.RIGHT_HIP.value}
+    neck_j   = {mp_pose.PoseLandmark.LEFT_EAR.value,
+                mp_pose.PoseLandmark.RIGHT_EAR.value,
+                mp_pose.PoseLandmark.NOSE.value}
+    if lm_idx in spine_j:
         return max(back_bad, sh_bad)
-    if lm_idx in neck_joints:
+    if lm_idx in neck_j:
         return head_bad
     return 0.0
 
 
 def draw_user_skeleton(frame, landmarks, back_angle=0, head_fwd=0, shoulder_tilt=0):
-    """Squelette avec heatmap couleur selon tension des articulations."""
     if frame is None:
         return
-    h, w = frame.shape[0], frame.shape[1]
+    h, w = frame.shape[:2]
     for (si, ei) in mp_pose.POSE_CONNECTIONS:
         strain = (_joint_strain(si, back_angle, head_fwd, shoulder_tilt) +
                   _joint_strain(ei, back_angle, head_fwd, shoulder_tilt)) / 2
-        # Interpolation couleur vert → rouge selon tension
-        r = int(0   + strain * 180)
-        g = int(220 - strain * 190)
-        b = int(100 - strain * 100)
-        col = (r, g, b)
+        col = (int(strain*180), int(220 - strain*190), int(100 - strain*100))
         cv2.line(frame,
                  (int(landmarks[si].x*w), int(landmarks[si].y*h)),
                  (int(landmarks[ei].x*w), int(landmarks[ei].y*h)),
@@ -426,23 +628,17 @@ def draw_user_skeleton(frame, landmarks, back_angle=0, head_fwd=0, shoulder_tilt
     for idx, lm in enumerate(landmarks):
         cx, cy = int(lm.x*w), int(lm.y*h)
         strain = _joint_strain(idx, back_angle, head_fwd, shoulder_tilt)
-        r = int(0   + strain * 200)
-        g = int(220 - strain * 200)
-        b = int(100 - strain * 100)
-        col = (r, g, b)
+        col = (int(strain*200), int(220 - strain*200), int(100 - strain*100))
         cv2.circle(frame, (cx, cy), 5, col, -1, cv2.LINE_AA)
         cv2.circle(frame, (cx, cy), 2, COLOR_WHITE, -1, cv2.LINE_AA)
 
 
 def draw_ghost_skeleton(frame, landmarks, calibrated_landmarks, frame_shape, posture_score):
-    """Fantôme avec support des landmarks calibrés comme référence."""
     if frame is None:
         return frame
     h, w, _ = frame_shape
-    ox = int(w * 0.52)
-
-    source = calibrated_landmarks if calibrated_landmarks else landmarks
-
+    ox      = int(w * 0.52)
+    source  = calibrated_landmarks if calibrated_landmarks else landmarks
     ghost_pts = {}
     for idx, lm in enumerate(source):
         gx = int(lm.x * w * 0.40 + ox)
@@ -458,111 +654,108 @@ def draw_ghost_skeleton(frame, landmarks, calibrated_landmarks, frame_shape, pos
                    mp_pose.PoseLandmark.RIGHT_HIP.value]:
             gy -= int(h * 0.01)
         ghost_pts[idx] = (gx, gy)
-
     for (si, ei) in mp_pose.POSE_CONNECTIONS:
         if si in ghost_pts and ei in ghost_pts:
             cv2.line(frame, ghost_pts[si], ghost_pts[ei], COLOR_GHOST_BONE, 3, cv2.LINE_AA)
     for pt in ghost_pts.values():
         cv2.circle(frame, pt, 5, COLOR_WHITE, -1, cv2.LINE_AA)
         cv2.circle(frame, pt, 3, COLOR_GHOST, -1, cv2.LINE_AA)
-
-    lx = int(w * 0.73)
+    lx          = int(w * 0.73)
     ghost_label = "CALIBRE" if calibrated_landmarks else "OBJECTIF"
     ghost_sub   = "Ta posture ideale" if calibrated_landmarks else "Posture ideale"
-    cv2.putText(frame, ghost_label, (lx-38, 50),
-                cv2.FONT_HERSHEY_DUPLEX, 0.55, COLOR_GHOST, 1, cv2.LINE_AA)
-    cv2.putText(frame, ghost_sub,   (lx-50, 70),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200,180,255), 1, cv2.LINE_AA)
-
+    cv2.putText(frame, ghost_label, (lx-38, 50), cv2.FONT_HERSHEY_DUPLEX, 0.55, COLOR_GHOST, 1, cv2.LINE_AA)
+    cv2.putText(frame, ghost_sub,   (lx-50, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200,180,255), 1, cv2.LINE_AA)
     if posture_score < WARNING_THRESHOLD:
         ax, ay = int(w*0.61), int(h*0.45)
-        cv2.arrowedLine(frame, (ax, ay), (ax+80, ay), COLOR_CYAN, 2,
-                        cv2.LINE_AA, tipLength=0.35)
+        cv2.arrowedLine(frame, (ax, ay), (ax+80, ay), COLOR_CYAN, 2, cv2.LINE_AA, tipLength=0.35)
         cv2.putText(frame, "Copiez-moi !", (ax-10, ay-12),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.48, COLOR_CYAN, 1, cv2.LINE_AA)
     return frame
 
-# ============================================
+# ============================================================
 # PANNEAUX HUD
-# ============================================
+# ============================================================
 
 def draw_left_panel(frame, score, back_angle, head_fwd, shoulder_tilt,
-                    fps, good_pct, muted, scores_history, sitting):
-    pw, ph = 320, 490
+                    fps, good_pct, muted, scores_history, sitting,
+                    avg_score, session_elapsed):
+    pw, ph = 330, 530
     px, py = 16, 16
-    rounded_rect(frame, px, py, px+pw, py+ph, COLOR_PANEL_BG, r=18, alpha=0.90)
+    rounded_rect(frame, px, py, px+pw, py+ph, panel_bg(), r=18, alpha=0.91)
 
-    # En-tête
-    cv2.putText(frame, "POSTUREGHOST", (px+16, py+30),
-                cv2.FONT_HERSHEY_DUPLEX, 0.62, COLOR_ACCENT, 1, cv2.LINE_AA)
+    night_label = " [Nuit]" if night_mode_active() else ""
+    cv2.putText(frame, f"POSTUREGHOST{night_label}", (px+16, py+30),
+                cv2.FONT_HERSHEY_DUPLEX, 0.60, COLOR_ACCENT, 1, cv2.LINE_AA)
 
-    # Badge position assise/debout
-    pos_label = "Assis" if sitting else "Debout"
-    pos_col   = (130, 200, 255) if sitting else (100, 230, 130)
-    rounded_rect(frame, px+200, py+14, px+300, py+34, (45, 38, 70), r=8)
-    cv2.putText(frame, pos_label, (px+214, py+28),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, pos_col, 1, cv2.LINE_AA)
+    pos_col = (130,200,255) if sitting else (100,230,130)
+    rounded_rect(frame, px+200, py+14, px+310, py+34, (45,38,70), r=8)
+    cv2.putText(frame, "Assis" if sitting else "Debout",
+                (px+212, py+28), cv2.FONT_HERSHEY_SIMPLEX, 0.38, pos_col, 1, cv2.LINE_AA)
 
-    cv2.line(frame, (px+16, py+42), (px+pw-16, py+42), (55, 48, 80), 1)
+    cv2.line(frame, (px+16, py+42), (px+pw-16, py+42), (55,48,80), 1)
 
-    # Anneau score + label statut
-    ring_cx, ring_cy = px + 74, py + 120
+    ring_cx, ring_cy = px+74, py+120
     draw_score_ring(frame, ring_cx, ring_cy, score)
     status, s_color = get_status(score)
-    cv2.putText(frame, status, (ring_cx - 28, ring_cy + 75),
+    cv2.putText(frame, status, (ring_cx-28, ring_cy+75),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.52, s_color, 1, cv2.LINE_AA)
 
-    # Tendance
-    draw_trend_indicator(frame, scores_history, px+160, ring_cy - 10)
+    draw_trend_indicator(frame, list(scores_history), px+162, ring_cy-10)
+    cv2.putText(frame, f"Moy:{avg_score:.0f}", (px+162, ring_cy+20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (160,160,200), 1, cv2.LINE_AA)
+    draw_session_timer(frame, session_elapsed, px+162, ring_cy+44)
 
-    # Mini graphe
-    draw_mini_graph(frame, list(scores_history), px+148, ring_cy - 55, 155, 100)
+    draw_mini_graph(frame, list(scores_history), px+148, ring_cy-55, 162, 100)
 
-    cv2.line(frame, (px+16, py+200), (px+pw-16, py+200), (55, 48, 80), 1)
+    cv2.line(frame, (px+16, py+208), (px+pw-16, py+208), (55,48,80), 1)
 
-    # Métriques
     def metric(label, val_str, badness, y0):
         bc = COLOR_GREEN if badness < 30 else (COLOR_ORANGE if badness < 65 else COLOR_RED)
         cv2.putText(frame, label,   (px+16, y0),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (175, 175, 210), 1, cv2.LINE_AA)
-        cv2.putText(frame, val_str, (px+220, y0),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (175,175,210), 1, cv2.LINE_AA)
+        cv2.putText(frame, val_str, (px+230, y0),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.40, COLOR_WHITE, 1, cv2.LINE_AA)
-        progress_bar(frame, px+16, y0+5, 288, 7, min(100, badness), bc)
+        progress_bar(frame, px+16, y0+5, 298, 7, min(100, badness), bc)
 
-    metric("Inclinaison dos",   f"{back_angle:.1f} deg",   min(100, back_angle*1.8),    py+220)
-    metric("Tete en avant",     f"{abs(head_fwd):.0f} px", min(100, abs(head_fwd)*0.9), py+260)
-    metric("Asymetrie epaules", f"{shoulder_tilt:.0f} px", min(100, shoulder_tilt*2.0), py+300)
+    metric("Inclinaison dos",   f"{back_angle:.1f}d",     min(100, back_angle*1.8),    py+228)
+    metric("Tete en avant",     f"{abs(head_fwd):.0f}px", min(100, abs(head_fwd)*0.9), py+268)
+    metric("Asymetrie epaules", f"{shoulder_tilt:.0f}px", min(100, shoulder_tilt*2.0), py+308)
 
-    cv2.line(frame, (px+16, py+328), (px+pw-16, py+328), (55, 48, 80), 1)
+    cv2.line(frame, (px+16, py+336), (px+pw-16, py+336), (55,48,80), 1)
 
-    # Bonne posture session
-    cv2.putText(frame, "Bonne posture session", (px+16, py+350),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.43, (150, 150, 190), 1, cv2.LINE_AA)
-    cv2.putText(frame, f"{good_pct:.0f}%", (px+232, py+350),
+    cv2.putText(frame, "Bonne posture session", (px+16, py+358),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.43, (150,150,190), 1, cv2.LINE_AA)
+    cv2.putText(frame, f"{good_pct:.0f}%", (px+242, py+358),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.43, COLOR_CYAN, 1, cv2.LINE_AA)
-    progress_bar(frame, px+16, py+358, 288, 10, good_pct, COLOR_CYAN)
+    progress_bar(frame, px+16, py+366, 298, 10, good_pct, COLOR_CYAN)
 
-    cv2.line(frame, (px+16, py+382), (px+pw-16, py+382), (55, 48, 80), 1)
+    good_sec = int(good_pct / 100 * session_elapsed)
+    bad_sec  = int(session_elapsed - good_sec)
+    cv2.putText(frame, f"Bonne: {good_sec//60}m{good_sec%60:02d}s",
+                (px+16, py+394), cv2.FONT_HERSHEY_SIMPLEX, 0.37, COLOR_GREEN, 1, cv2.LINE_AA)
+    cv2.putText(frame, f"Mauvaise: {bad_sec//60}m{bad_sec%60:02d}s",
+                (px+162, py+394), cv2.FONT_HERSHEY_SIMPLEX, 0.37, COLOR_RED, 1, cv2.LINE_AA)
 
-    # Mute + FPS
+    cv2.line(frame, (px+16, py+410), (px+pw-16, py+410), (55,48,80), 1)
+
     mute_color = COLOR_RED if muted else COLOR_GREEN
-    cv2.circle(frame, (px+26, py+404), 7, mute_color, -1, cv2.LINE_AA)
+    cv2.circle(frame, (px+26, py+432), 7, mute_color, -1, cv2.LINE_AA)
     cv2.putText(frame, "Son COUPE" if muted else "Son ACTIF",
-                (px+40, py+409), cv2.FONT_HERSHEY_SIMPLEX, 0.42, mute_color, 1, cv2.LINE_AA)
+                (px+40, py+437), cv2.FONT_HERSHEY_SIMPLEX, 0.42, mute_color, 1, cv2.LINE_AA)
 
-    cv2.putText(frame, f"{fps:.0f} FPS", (px+244, py+ph-12),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (80, 80, 110), 1, cv2.LINE_AA)
+    cv2.putText(frame, f"{fps:.0f} FPS", (px+250, py+ph-12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (80,80,110), 1, cv2.LINE_AA)
 
 
-def draw_top_alert(frame, score, status):
+def draw_top_alert(frame, score):
     if frame is None:
         return frame
-    h, w = frame.shape[0], frame.shape[1]
+    h, w = frame.shape[:2]
     if score < WARNING_THRESHOLD:
         color = COLOR_RED if score < CRITICAL_THRESHOLD else COLOR_ORANGE
         msg   = ("DANGER ! Redressez-vous IMMEDIATEMENT"
                  if score < CRITICAL_THRESHOLD
-                 else "Mauvaise posture — Suivez le fantome")
+                 else "Mauvaise posture - Suivez le fantome")
         rounded_rect(frame, w//2-300, 10, w//2+300, 52, color, r=10, alpha=0.78)
         cv2.putText(frame, msg, (w//2-240, 38),
                     cv2.FONT_HERSHEY_DUPLEX, 0.60, COLOR_WHITE, 1, cv2.LINE_AA)
@@ -574,31 +767,51 @@ def draw_top_alert(frame, score, status):
 def draw_ghost_zone_bg(frame):
     if frame is None:
         return frame
-    h, w = frame.shape[0], frame.shape[1]
-    rounded_rect(frame, int(w*0.50), 8, w-8, h-8, (20, 16, 36), r=14, alpha=0.45)
+    h, w = frame.shape[:2]
+    rounded_rect(frame, int(w*0.50), 8, w-8, h-8, (20,16,36), r=14, alpha=0.45)
     return frame
 
 
 def draw_calibration_overlay(frame, countdown):
-    """Affiche un compte à rebours de calibration en overlay."""
     h, w = frame.shape[:2]
-    rounded_rect(frame, w//2-240, h//2-55, w//2+240, h//2+55,
-                 (30, 25, 50), r=16, alpha=0.92)
+    rounded_rect(frame, w//2-240, h//2-55, w//2+240, h//2+55, (30,25,50), r=16, alpha=0.92)
     cv2.putText(frame, "CALIBRATION",
-                (w//2-90, h//2-20),
-                cv2.FONT_HERSHEY_DUPLEX, 0.75, COLOR_ACCENT, 1, cv2.LINE_AA)
+                (w//2-90, h//2-20), cv2.FONT_HERSHEY_DUPLEX, 0.75, COLOR_ACCENT, 1, cv2.LINE_AA)
     cv2.putText(frame, f"Adoptez votre meilleure posture... {countdown}",
-                (w//2-200, h//2+18),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.52, COLOR_WHITE, 1, cv2.LINE_AA)
-    # Anneau de progression
-    draw_arc_ring(frame, w//2+185, h//2, 20, 4,
-                  int((3 - countdown) / 3 * 100), COLOR_ACCENT)
+                (w//2-200, h//2+18), cv2.FONT_HERSHEY_SIMPLEX, 0.52, COLOR_WHITE, 1, cv2.LINE_AA)
+    draw_arc_ring(frame, w//2+185, h//2, 20, 4, int((3-countdown)/3*100), COLOR_ACCENT)
+
+
+def draw_help_overlay(frame):
+    h, w = frame.shape[:2]
+    rounded_rect(frame, w//2-290, h//2-195, w//2+290, h//2+195, (18,14,36), r=18, alpha=0.96)
+    cv2.putText(frame, "RACCOURCIS CLAVIER",
+                (w//2-130, h//2-165), cv2.FONT_HERSHEY_DUPLEX, 0.65, COLOR_ACCENT, 1, cv2.LINE_AA)
+    shortcuts = [
+        ("Q", "Quitter l'application"),
+        ("R", "Reinitialiser les stats"),
+        ("S", "Capturer une screenshot"),
+        ("M", "Mute / Activer le son"),
+        ("C", "Calibrer le fantome"),
+        ("B", "Toggle respiration guidee"),
+        ("P", "Toggle rappel de pause"),
+        ("H", "Afficher / cacher cette aide"),
+    ]
+    for i, (key, desc) in enumerate(shortcuts):
+        yy = h//2 - 120 + i * 38
+        rounded_rect(frame, w//2-270, yy-16, w//2-220, yy+8, (50,40,90), r=6)
+        cv2.putText(frame, key,  (w//2-257, yy+2),
+                    cv2.FONT_HERSHEY_DUPLEX, 0.52, COLOR_WHITE, 1, cv2.LINE_AA)
+        cv2.putText(frame, desc, (w//2-205, yy+2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (200,195,230), 1, cv2.LINE_AA)
+    cv2.putText(frame, "Appuyez sur H pour fermer",
+                (w//2-120, h//2+170), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (100,100,140), 1, cv2.LINE_AA)
 
 
 def draw_motivation(frame, last_scores):
     if frame is None or len(last_scores) < 10:
         return
-    h, w = frame.shape[0], frame.shape[1]
+    h, w  = frame.shape[:2]
     trend = last_scores[-1] - last_scores[-10]
     if trend > 8:
         txt, col = "Super progression !", COLOR_GREEN
@@ -609,36 +822,33 @@ def draw_motivation(frame, last_scores):
     else:
         return
     tw = len(txt) * 9
-    bx = w - tw - 40
+    bx = w - tw - 165
     by = h - 58
-    rounded_rect(frame, bx-10, by-20, bx+tw+10, by+12, COLOR_PANEL_BG, r=8, alpha=0.82)
+    rounded_rect(frame, bx-10, by-20, bx+tw+10, by+12, panel_bg(), r=8, alpha=0.82)
     cv2.putText(frame, txt, (bx, by),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.50, col, 1, cv2.LINE_AA)
 
 
 def draw_gamification_panel(frame, gm, new_badge=None):
-    h, w = frame.shape[:2]
-    summ = gm.summary()
-    bar_x, bar_y = 340, h - 28
-    bar_w = 300
-    pct = min(1.0, summ["xp"] / max(1, summ["next_xp"]))
-    rounded_rect(frame, bar_x, bar_y, bar_x + bar_w, bar_y + 16, (38, 32, 65), r=8, alpha=0.85)
-    fill_w = max(16, int(pct * bar_w))
-    rounded_rect(frame, bar_x, bar_y, bar_x + fill_w, bar_y + 16, (130, 100, 220), r=8)
+    h, w     = frame.shape[:2]
+    summ     = gm.summary()
+    bar_x, bar_y, bar_w = 340, h-28, 300
+    pct      = min(1.0, summ["xp"] / max(1, summ["next_xp"]))
+    rounded_rect(frame, bar_x, bar_y, bar_x+bar_w, bar_y+16, (38,32,65), r=8, alpha=0.85)
+    rounded_rect(frame, bar_x, bar_y, bar_x+max(16,int(pct*bar_w)), bar_y+16, (130,100,220), r=8)
     cv2.putText(frame, f"Niv. {summ['level']}  {summ['xp']} XP",
-                (bar_x + 8, bar_y + 12),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, COLOR_WHITE, 1, cv2.LINE_AA)
+                (bar_x+8, bar_y+12), cv2.FONT_HERSHEY_SIMPLEX, 0.38, COLOR_WHITE, 1, cv2.LINE_AA)
     sx = bar_x + bar_w + 12
-    streak_col = COLOR_CYAN if summ["streak"] >= 3 else (130, 130, 160)
-    cv2.putText(frame, f"Serie: {summ['streak']}j",  (sx, bar_y + 12),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, streak_col, 1, cv2.LINE_AA)
-    cv2.putText(frame, f"{summ['badges']} badges", (sx + 90, bar_y + 12),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (160, 140, 210), 1, cv2.LINE_AA)
+    cv2.putText(frame, f"Serie: {summ['streak']}j", (sx, bar_y+12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                COLOR_CYAN if summ["streak"] >= 3 else (130,130,160), 1, cv2.LINE_AA)
+    cv2.putText(frame, f"{summ['badges']} badges", (sx+90, bar_y+12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (160,140,210), 1, cv2.LINE_AA)
     if new_badge:
         msg = f"{new_badge['icon']} {new_badge['name']}  +{new_badge['xp']} XP"
         tw  = len(msg) * 10
-        tx  = w // 2 - tw // 2
-        rounded_rect(frame, tx-12, 62, tx+tw+12, 94, (80, 60, 160), r=12, alpha=0.92)
+        tx  = w//2 - tw//2
+        rounded_rect(frame, tx-12, 62, tx+tw+12, 94, (80,60,160), r=12, alpha=0.92)
         cv2.putText(frame, msg, (tx, 84),
                     cv2.FONT_HERSHEY_DUPLEX, 0.55, COLOR_WHITE, 1, cv2.LINE_AA)
 
@@ -648,28 +858,29 @@ def draw_controls(frame):
         return
     h = frame.shape[0]
     cv2.putText(frame,
-                "Q:Quit  R:Reset  S:Capture  M:Mute  C:Calibrer  B:Respiration  P:Pause ON/OFF",
-                (20, h - 12),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.36, (80, 80, 115), 1, cv2.LINE_AA)
+                "Q:Quit  R:Reset  S:Cap  M:Mute  C:Calib  B:Resp  P:Pause  H:Aide",
+                (20, h-12), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (80,80,115), 1, cv2.LINE_AA)
 
-# ============================================
-# EXPORT CSV
-# ============================================
+# ============================================================
+# SESSION LOGGER
+# ============================================================
 
 class SessionLogger:
     def __init__(self):
-        self.rows = []
+        self.rows       = []
         self.start_time = time.time()
 
-    def log(self, score, back, head, shoulder, sitting):
-        elapsed = time.time() - self.start_time
+    def log(self, score, back, head, shoulder, neck, sitting, shrug, distracted):
         self.rows.append({
-            "t_sec": round(elapsed, 1),
-            "score": score,
-            "back_angle": round(back, 2),
-            "head_fwd":   round(head, 2),
+            "t_sec":         round(time.time() - self.start_time, 1),
+            "score":         score,
+            "back_angle":    round(back, 2),
+            "head_fwd":      round(head, 2),
             "shoulder_tilt": round(shoulder, 2),
-            "sitting": int(sitting),
+            "neck_angle":    round(neck, 2),
+            "sitting":       int(sitting),
+            "shrug":         int(shrug),
+            "distracted":    int(distracted),
         })
 
     def save(self):
@@ -682,20 +893,18 @@ class SessionLogger:
             writer.writeheader()
             writer.writerows(self.rows)
         print(f"  Export CSV : {fn}")
-        return fn
 
-# ============================================
+# ============================================================
 # MAIN
-# ============================================
+# ============================================================
 
 def main():
-    print("=" * 60)
-    print("  POSTUREGHOST v2.0  -  Coach IA + Voix + XP + Graphes")
-    print("=" * 60)
-    print("  Q : Quitter    R : Reset stats    S : Capture")
-    print("  M : Mute/Unmute    C : Calibrer posture")
-    print("  B : Toggle respiration    P : Pause ON/OFF")
-    print("=" * 60)
+    print("=" * 65)
+    print("  POSTUREGHOST v3.0  -  Coach IA + Voix + XP + Rapports")
+    print("=" * 65)
+    print("  Q:Quit  R:Reset  S:Screenshot  M:Mute  C:Calibrer")
+    print("  B:Respiration  P:Pause ON/OFF  H:Aide")
+    print("=" * 65)
 
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  RESOLUTION_WIDTH)
@@ -708,8 +917,8 @@ def main():
 
     os.makedirs("screenshots", exist_ok=True)
 
-    voice = VoiceCoach(lang='fr')
-    print("  Coach vocal initialise.")
+    voice   = VoiceCoach(lang='fr')
+    history = SessionHistory()
 
     if GAMIFICATION_AVAILABLE:
         gm = GamificationManager()
@@ -720,38 +929,51 @@ def main():
 
     logger = SessionLogger() if EXPORT_CSV else None
 
+    # ---- Etat ----
     frame_count       = 0
     fps               = 30.0
     prev_time         = time.time()
     session_start     = time.time()
     scores_history    = deque(maxlen=90)
+    all_scores        = []
     good_posture_time = 0.0
     total_time        = 0.0
 
-    last_score      = 0
-    last_back       = 0.0
-    last_head_fwd   = 0.0
-    last_shoulder   = 0.0
+    last_score    = 0
+    last_back     = 0.0
+    last_head_fwd = 0.0
+    last_shoulder = 0.0
+    last_neck     = 0.0
     last_landmarks  = None
     sitting         = False
+    shrug           = False
+    distracted      = False
+    fatigued        = False
 
-    # Ghost / calibration
     calibrated_landmarks = None
     calibrating          = False
     calib_start          = 0.0
     CALIB_DURATION       = 3.0
 
-    active_badge      = None
-    badge_show_until  = 0.0
+    active_badge     = None
+    badge_show_until = 0.0
 
-    # Minuterie de pause
-    break_timer_active   = BREAK_REMINDER_SEC > 0
-    time_of_last_break   = time.time()
+    break_timer_active = BREAK_REMINDER_SEC > 0
+    time_of_last_break = time.time()
 
-    # Respiration guidée
+    stretch_active     = True
+    time_last_stretch  = time.time()
+    stretch_idx        = 0
+    show_stretch_until = 0.0
+
     show_breathing = True
+    show_help      = False
 
-    print("=" * 60)
+    tip_idx       = 0
+    last_tip_time = time.time()
+    TIP_INTERVAL  = 15.0
+
+    print("=" * 65)
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -760,12 +982,17 @@ def main():
             break
 
         frame = cv2.flip(frame, 1)
-        now     = time.time()
-        elapsed = now - prev_time
-        fps     = 0.9 * fps + 0.1 / elapsed if elapsed > 0 else fps
-        prev_time   = now
+        now          = time.time()
+        elapsed      = now - prev_time
+        fps          = 0.9*fps + 0.1/elapsed if elapsed > 0 else fps
+        prev_time    = now
         session_time = now - session_start
         frame_count += 1
+
+        # Rotation des conseils
+        if now - last_tip_time > TIP_INTERVAL:
+            tip_idx       = (tip_idx + 1) % len(POSTURE_TIPS)
+            last_tip_time = now
 
         # ---- Traitement pose ----
         if frame_count % FRAME_SKIP == 0:
@@ -777,13 +1004,18 @@ def main():
 
             if results.pose_landmarks:
                 last_landmarks = results.pose_landmarks.landmark
-                last_score, last_back, last_head_fwd, last_shoulder = \
-                    calculate_posture_score(last_landmarks, frame.shape)
-                sitting = detect_sitting(last_landmarks, frame.shape)
+                (last_score, last_back, last_head_fwd,
+                 last_shoulder, last_neck) = calculate_posture_score(
+                    last_landmarks, frame.shape)
+
+                sitting    = detect_sitting(last_landmarks, frame.shape)
+                shrug      = detect_shrug(last_landmarks, frame.shape)
+                distracted = detect_distraction(last_landmarks, frame.shape)
 
                 scores_history.append(last_score)
+                all_scores.append(last_score)
 
-                dt = 1.0 / fps if fps > 0 else 0
+                dt = 1.0/fps if fps > 0 else 0
                 total_time += dt
                 if last_score >= GOOD_POSTURE_THRESHOLD:
                     good_posture_time += dt
@@ -796,24 +1028,39 @@ def main():
                     if earned:
                         active_badge     = earned[0]
                         badge_show_until = now + 3.0
-                        voice.say(f"Badge débloqué : {earned[0]['name']} !", force=True)
+                        voice.say(f"Badge debloque : {earned[0]['name']} !", force=True)
+
+                fatigued = detect_fatigue(scores_history)
 
                 alert, force = get_voice_alert(
                     last_score, last_back, last_head_fwd, last_shoulder)
                 if alert:
                     voice.say(alert, force=force)
+                if shrug:
+                    voice.say("Detendez vos epaules.")
+                if distracted:
+                    voice.say("Regardez votre ecran.")
+                if fatigued:
+                    voice.say("Vous semblez fatigue, faites une pause.", force=True)
 
                 if logger and frame_count % 15 == 0:
-                    logger.log(last_score, last_back, last_head_fwd, last_shoulder, sitting)
+                    logger.log(last_score, last_back, last_head_fwd,
+                               last_shoulder, last_neck, sitting, shrug, distracted)
 
-                # Calibration : capture du fantôme après décompte
                 if calibrating and (now - calib_start) >= CALIB_DURATION:
                     calibrated_landmarks = list(last_landmarks)
                     calibrating = False
-                    voice.say("Calibration enregistrée ! Ce sera votre posture de référence.", force=True)
+                    voice.say("Calibration enregistree !", force=True)
                     print("  Calibration OK.")
 
-        # Badge toast timeout
+        # Stretch reminder
+        if stretch_active and (now - time_last_stretch) >= STRETCH_INTERVAL:
+            show_stretch_until = now + 5.0
+            time_last_stretch  = now
+            ex = STRETCH_EXERCISES[stretch_idx % len(STRETCH_EXERCISES)]
+            stretch_idx += 1
+            voice.say(f"Exercice : {ex}", force=True)
+
         if active_badge and now > badge_show_until:
             active_badge = None
 
@@ -822,8 +1069,8 @@ def main():
         if break_timer_active and BREAK_REMINDER_SEC > 0:
             time_until_break = max(0, BREAK_REMINDER_SEC - (now - time_of_last_break))
             if time_until_break == 0 and now - time_of_last_break > BREAK_REMINDER_SEC:
-                voice.say("C'est l'heure de faire une pause ! Levez-vous et bougez.", force=True)
-                time_of_last_break = now  # reset
+                voice.say("C'est l'heure de la pause ! Levez-vous.", force=True)
+                time_of_last_break = now
 
         # ---- Dessin ----
         if last_landmarks is not None:
@@ -831,40 +1078,57 @@ def main():
             frame = draw_ghost_zone_bg(frame)
             frame = draw_ghost_skeleton(frame, last_landmarks, calibrated_landmarks,
                                         frame.shape, last_score)
+            draw_neck_angle(frame, last_landmarks, frame.shape, last_neck)
         else:
-            h_f, w_f = frame.shape[0], frame.shape[1]
-            rounded_rect(frame, w_f//2-220, h_f//2-35, w_f//2+220, h_f//2+35,
-                         COLOR_PANEL_BG, r=12, alpha=0.85)
+            hf, wf = frame.shape[:2]
+            rounded_rect(frame, wf//2-220, hf//2-35, wf//2+220, hf//2+35,
+                         panel_bg(), r=12, alpha=0.85)
             cv2.putText(frame, "Placez-vous devant la webcam",
-                        (w_f//2-195, h_f//2+8),
+                        (wf//2-195, hf//2+8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, COLOR_WHITE, 1, cv2.LINE_AA)
 
-        good_pct = (good_posture_time / total_time * 100) if total_time > 0 else 0
-        status, _ = get_status(last_score)
-        h_f, w_f = frame.shape[0], frame.shape[1]
+        good_pct  = (good_posture_time / total_time * 100) if total_time > 0 else 0
+        avg_score = float(np.mean(all_scores)) if all_scores else 0.0
+        hf, wf    = frame.shape[:2]
 
         draw_left_panel(frame, last_score, last_back, last_head_fwd,
                         last_shoulder, fps, good_pct, voice.muted,
-                        scores_history, sitting)
-        frame = draw_top_alert(frame, last_score, status)
+                        scores_history, sitting, avg_score, session_time)
+        frame = draw_top_alert(frame, last_score)
         draw_motivation(frame, list(scores_history))
 
         if gm:
             draw_gamification_panel(frame, gm, active_badge)
 
         if break_timer_active and BREAK_REMINDER_SEC > 0:
-            draw_break_reminder(frame, w_f, h_f, time_until_break, BREAK_REMINDER_SEC)
+            draw_break_reminder(frame, wf, hf, time_until_break, BREAK_REMINDER_SEC)
 
         if show_breathing:
-            draw_breathing_guide(frame, w_f, h_f, session_time)
+            draw_breathing_guide(frame, wf, hf, session_time)
+
+        if now < show_stretch_until and last_landmarks is not None:
+            draw_stretch_reminder(frame, wf, hf,
+                                  STRETCH_EXERCISES[(stretch_idx-1) % len(STRETCH_EXERCISES)])
+
+        if shrug:
+            draw_shrug_warning(frame, wf)
+        if distracted:
+            draw_distraction_warning(frame, wf, hf)
+        if fatigued:
+            draw_fatigue_warning(frame, wf, hf)
+
+        draw_tip_panel(frame, wf, hf, POSTURE_TIPS[tip_idx])
 
         if calibrating:
             countdown = max(0, int(CALIB_DURATION - (now - calib_start)) + 1)
             draw_calibration_overlay(frame, countdown)
 
+        if show_help:
+            draw_help_overlay(frame)
+
         draw_controls(frame)
 
-        cv2.imshow("PostureGhost v2.0", frame)
+        cv2.imshow("PostureGhost v3.0", frame)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
@@ -873,6 +1137,7 @@ def main():
             good_posture_time = 0.0
             total_time        = 0.0
             scores_history.clear()
+            all_scores.clear()
             print("Stats reinitialisees.")
         elif key == ord('s'):
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -883,20 +1148,21 @@ def main():
             voice.muted = not voice.muted
             print("Son : COUPE" if voice.muted else "Son : ACTIF")
         elif key == ord('c'):
-            # Démarrer calibration
             if last_landmarks is not None:
-                calibrating  = True
-                calib_start  = time.time()
-                print("  Calibration démarrée — gardez la meilleure posture...")
+                calibrating = True
+                calib_start = time.time()
+                print("  Calibration demarree...")
             else:
-                print("  Aucun squelette détecté, impossible de calibrer.")
+                print("  Aucun squelette detecte.")
         elif key == ord('b'):
             show_breathing = not show_breathing
         elif key == ord('p'):
             break_timer_active = not break_timer_active
             print(f"Rappel pause : {'ON' if break_timer_active else 'OFF'}")
+        elif key == ord('h'):
+            show_help = not show_help
 
-    # ---- Cleanup & session summary ----
+    # ---- Cleanup ----
     if gm:
         gm.end_session(good_posture_time, last_score)
     voice.stop()
@@ -907,19 +1173,32 @@ def main():
     if logger:
         logger.save()
 
-    print("\n" + "=" * 60)
+    avg_score  = float(np.mean(all_scores)) if all_scores else 0.0
+    best_score = int(max(all_scores)) if all_scores else 0
+    good_pct   = (good_posture_time / total_time * 100) if total_time > 0 else 0
+
+    history.save_session(total_time, good_pct, avg_score, best_score)
+
+    if EXPORT_HTML_REPORT and all_scores:
+        generate_html_report(total_time, good_pct, avg_score, best_score,
+                             all_scores, history)
+
+    print("\n" + "=" * 65)
     print("  SESSION TERMINEE")
-    print("=" * 60)
+    print("=" * 65)
     if total_time > 0:
-        print(f"  Duree         : {total_time:.0f} sec")
-        print(f"  Bonne posture : {good_posture_time:.0f} sec")
-        print(f"  Pourcentage   : {good_posture_time/total_time*100:.1f} %")
+        print(f"  Duree           : {total_time:.0f} sec ({int(total_time)//60} min)")
+        print(f"  Bonne posture   : {good_posture_time:.0f} sec  ({good_pct:.1f}%)")
+        print(f"  Score moyen     : {avg_score:.1f}")
+        print(f"  Meilleur score  : {best_score}")
+        print(f"  Streak sessions : {history.best_streak()}")
+        print(f"  Moy. historique : {history.all_time_avg()}")
     if gm:
-        print(f"  XP cette session : +{gm.xp_gained}")
-        print(f"  Total XP         : {gm.stats['xp']}")
-        print(f"  Niveau           : {gm.summary()['level']}")
-        print(f"  Badges           : {gm.stats['unlocked']}")
-    print("=" * 60)
+        print(f"  XP cette session: +{gm.xp_gained}")
+        print(f"  Total XP        : {gm.stats['xp']}")
+        print(f"  Niveau          : {gm.summary()['level']}")
+        print(f"  Badges          : {gm.stats['unlocked']}")
+    print("=" * 65)
 
 
 if __name__ == "__main__":
