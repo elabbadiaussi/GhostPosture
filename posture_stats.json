@@ -1,13 +1,14 @@
 {
-  "xp": 224,
+  "xp": 301,
   "sessions": 2,
   "streak": 2,
   "last_session": "2026-04-14",
   "best_score": 95,
-  "good_frames": 4239,
-  "good_minutes": 4.657071611604497,
+  "good_frames": 4917,
+  "good_minutes": 5.1156734619069555,
   "unlocked": [
     "first_good",
-    "score_90"
+    "score_90",
+    "five_minutes"
   ]
 }

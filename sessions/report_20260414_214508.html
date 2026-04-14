@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>PostureGhost - Rapport de session</title>
+<style>
+  body { font-family: sans-serif; background: #0f0c1a; color: #e0daf5; margin: 0; padding: 2rem; }
+  h1 { color: #a06cff; } h2 { color: #7dd6f0; margin-top: 2rem; }
+  .cards { display: flex; gap: 1.5rem; flex-wrap: wrap; margin: 1.5rem 0; }
+  .card { background: #1c1630; border-radius: 12px; padding: 1.2rem 1.8rem; min-width: 160px; }
+  .card .val { font-size: 2rem; font-weight: bold; }
+  .card .lbl { font-size: 0.8rem; color: #9090b0; margin-top: 4px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 0.5rem 1rem; text-align: left; border-bottom: 1px solid #2a2440; }
+  th { color: #a06cff; }
+</style>
+</head>
+<body>
+<h1>PostureGhost v3.0 - Rapport de session</h1>
+<p style="color:#7090a0">Tuesday 14 April 2026, 21:45</p>
+<div class="cards">
+  <div class="card"><div class="val" style="color:#4ede7b">0%</div><div class="lbl">Bonne posture</div></div>
+  <div class="card"><div class="val" style="color:#a06cff">38</div><div class="lbl">Score moyen</div></div>
+  <div class="card"><div class="val" style="color:#7dd6f0">49</div><div class="lbl">Meilleur score</div></div>
+  <div class="card"><div class="val" style="color:#ffcc55">0 min</div><div class="lbl">Duree</div></div>
+  <div class="card"><div class="val" style="color:#ff8c32">0</div><div class="lbl">Streak sessions</div></div>
+  <div class="card"><div class="val" style="color:#c0c0e0">55.8</div><div class="lbl">Moy. historique</div></div>
+</div>
+<h2>Courbe de score</h2>
+<svg width="600" height="100" style="background:#1a1628;border-radius:8px"><polyline points="10,70 11,74 13,71 14,71 16,66 17,61 19,60 21,61 22,62 24,59 25,62 27,62 29,59 30,61 32,61 33,63 35,65 37,64 38,63 40,70 41,70 43,63 44,59 46,60 48,63 49,67 51,66 52,65 54,64 56,64 57,66 59,66 60,62 62,58 64,58 65,61 67,62 68,58 70,57 71,58 73,62 75,66 76,67 78,67 79,65 81,68 83,65 84,65 86,64 87,64 89,61 91,59 92,60 94,60 95,60 97,60 98,59 100,56 102,58 103,61 105,61 106,66 108,66 110,63 111,62 113,62 114,62 116,62 118,60 119,63 121,64 122,63 124,65 126,64 127,63 129,55 130,56 132,58 133,56 135,61 137,66 138,63 140,62 141,64 143,61 145,66 146,58 148,54 149,58 151,61 153,58 154,57 156,62 157,62 159,61 160,70 162,73 164,65 165,58 167,60 168,61 170,60 172,58 173,62 175,66 176,66 178,67 180,63 181,64 183,58 184,60 186,55 187,58 189,59 191,59 192,58 194,59 195,58 197,64 199,67 200,62 202,65 203,63 205,59 207,56 208,53 210,54 211,57 213,55 214,58 216,58 218,58 219,58 221,60 222,62 224,59 226,59 227,61 229,70 230,62 232,62 234,59 235,59 237,59 238,60 240,62 242,58 243,56 245,56 246,56 248,58 249,60 251,58 253,62 254,60 256,58 257,58 259,59 261,59 262,59 264,60 265,58 267,58 269,56 270,58 272,58 273,58 275,58 276,58 278,62 280,54 281,53 283,56 284,53 286,54 288,55 289,58 291,58 292,55 294,56 296,55 297,55 299,55 300,54 302,55 303,56 305,54 307,54 308,54 310,54 311,51 313,52 315,52 316,51 318,55 319,53 321,54 323,56 324,58 326,62 327,54 329,53 330,55 332,53 334,53 335,53 337,53 338,55 340,55 342,54 343,52 345,55 346,58 348,58 350,59 351,54 353,54 354,54 356,54 358,54 359,54 361,54 362,53 364,53 365,54 367,53 369,54 370,66 372,71 373,68 375,62 377,60 378,61 380,66 381,68 383,66 385,66 386,61 388,59 389,58 391,59 392,60 394,59 396,60 397,61 399,62 400,62 402,65 404,65 405,65 407,66 408,66 410,66 412,66 413,66 415,67 416,66 418,66 419,67 421,67 423,66 424,66 426,66 427,66 429,66 431,66 432,65 434,63 435,65 437,64 439,62 440,58 442,61 443,61 445,62 446,61 448,58 450,58 451,59 453,59 454,59 456,60 458,61 459,62 461,62 462,59 464,58 466,61 467,61 469,61 470,61 472,60 474,58 475,56 477,58 478,60 480,59 481,59 483,61 485,59 486,58 488,58 489,58 491,58 493,58 494,59 496,60 497,54 499,58 501,58 502,57 504,57 505,58 507,58 508,57 510,60 512,60 513,61 515,60 516,62 518,60 520,59 521,60 523,60 524,60 526,57 528,56 529,56 531,56 532,56 534,56 535,55 537,58 539,58 540,57 542,60 543,61 545,60 547,58 548,62 550,60 551,60 553,58 555,58 556,58 558,57 559,58 561,58 562,58 564,58 566,60 567,62 569,62 570,59 572,58 574,58 575,58 577,58 578,58 580,59 582,59 583,58 585,58 586,58 588,58 590,58" fill="none" stroke="#a06cff" stroke-width="2"/></svg>
+<h2>10 dernieres sessions</h2>
+<table>
+  <tr><th>Date</th><th>Duree</th><th>Bonne posture</th><th>Score moy.</th><th>Meilleur</th></tr>
+  <tr><td>2026-04-14 21:45</td><td>0 min</td><td style='color:#ff8c32'>0.0%</td><td>38.0</td><td>49</td></tr>
+<tr><td>2026-04-14 00:46</td><td>0 min</td><td style='color:#4ede7b'>66.6%</td><td>73.7</td><td>94</td></tr>
+
+</table>
+<p style="color:#3a3460;margin-top:3rem">Genere par PostureGhost v3.0</p>
+</body>
+</html>
